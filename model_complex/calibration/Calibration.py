@@ -137,3 +137,66 @@ class Calibration:
         beta = ret.x[alpha_len:]
 
         return alpha, beta, round(self.rho/10)
+    
+    
+    def mcmc_calibration(self, verbose=False, with_rho=False, with_initi=False, tune=2500, draws=500, chains=4):
+        '''
+        Parameters:
+            - verbose -- show pymc progressbar
+            - with_rho -- tune population size
+            - with_initi -- tune initial infected
+            - tune -- number of mcmc warmup samples
+            - draws -- number of mcmc draws
+            - chains -- number of chains
+        '''
+        
+        init_inf = self.init_infectious
+        rho = self.rho//10
+        
+        data, alpha_len, beta_len = self.model.params(self.data)
+        progressbar = verbose
+        data = np.nan_to_num(data).tolist() 
+
+        def simulation_func(rng, alpha, beta, rho, init_inf, 
+                            modeling_duration, size=None):
+            
+            self.model.simulate(
+                alpha=np.array(alpha).flatten(), 
+                beta=np.array(beta).flatten(), 
+                initial_infectious=np.array(init_inf).flatten(), 
+                rho=np.array(rho).flatten(), 
+                modeling_duration=np.array(modeling_duration
+                                          ).flatten()[0]
+            )      
+            return self.model.newly_infected
+        
+         
+        
+        with pm.Model() as pm_model:
+            #alpha = pm.TruncatedNormal('a', mu=0.9, sigma=0.3, lower=0, upper=1, shape=alpha_len)
+            #beta = pm.TruncatedNormal('b', mu=0.9, sigma=0.3, lower=0, upper=1, shape=beta_len)
+            alpha = pm.Uniform(name="a", lower=0, upper=1, shape=alpha_len)
+            beta = pm.Uniform(name="b", lower=0, upper=1, shape=beta_len)
+            if with_rho:
+                rho = pm.Uniform(name="rho", lower=50000, upper=5000000)
+            if with_initi:
+                init_inf = pm.Uniform(name="init_inf", lower=1, upper=1000, shape=alpha_len)
+
+            # вынесем, тк для прогноза нужно будет задавать размер
+            modeling_duration = [int(len(data)/alpha_len)] 
+            sim = pm.Simulator("sim", simulation_func, alpha, beta,
+                                rho, init_inf, modeling_duration,
+                                epsilon=10000, 
+                               ndims_params=[alpha_len,beta_len,1,alpha_len,1],
+                               observed=data)
+                
+            # Differential evolution (DE) Metropolis sampler
+            #step=pm.DEMetropolisZ(proposal_dist=pm.LaplaceProposal)
+            step=pm.DEMetropolisZ()
+            idata = pm.sample(tune=tune, draws=draws, 
+                              cores=6, chains=chains,
+                              step=step, progressbar=progressbar)
+            idata.extend(pm.sample_posterior_predictive(idata,
+                                                        progressbar=progressbar))
+
+        return idata, data, simulation_func, pm_model
